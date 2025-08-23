@@ -9,5 +9,6 @@ func main() {
 	// generator.MSSQL()
 	// generator.Oracle()
 	// generator.Redis()
-	generator.MongoDB()
+	// generator.MongoDB()
+	generator.MySQLRelational()
 }
