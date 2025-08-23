@@ -7,5 +7,7 @@ func main() {
 	// generator.MySQL()
 	// generator.Postgres()
 	// generator.MSSQL()
-	generator.Oracle()
+	// generator.Oracle()
+	// generator.Redis()
+	generator.MongoDB()
 }
