@@ -10,5 +10,8 @@ func main() {
 	// generator.Oracle()
 	// generator.Redis()
 	// generator.MongoDB()
-	generator.MySQLRelational()
+	// generator.MySQLRelational()
+	// generator.PostgresRelational()
+	// generator.OracleRelational()
+	generator.MSQLRelational()
 }

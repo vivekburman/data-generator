@@ -133,3 +133,146 @@ func insertMSSQL(db *sql.DB) {
 
 	fmt.Printf("✅ Completed: %d records inserted into MSSQL user_activity_log\n", totalRecords)
 }
+func MSQLRelational() {
+	username := "sa"
+	password := "Mssql@123"
+	host := "localhost"
+	port := 1433
+	database := "source_data_db"
+
+	connString := fmt.Sprintf("server=%s;user id=%s;password=%s;port=%d;database=%s",
+		host, username, password, port, database)
+	db, err := sql.Open("sqlserver", connString)
+	if err != nil {
+		log.Fatal("Error creating connection pool: ", err.Error())
+		return
+	}
+	defer db.Close()
+
+	createUsersTableMSSQL(db)
+	createSessionsTableMSSQL(db)
+	createActivityTableMSSQL(db)
+	insertRelationalDataMSSQL(db)
+}
+
+func createUsersTableMSSQL(db *sql.DB) {
+	createTable := `
+ IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')
+ BEGIN
+  CREATE TABLE users (
+   id BIGINT IDENTITY(1,1) PRIMARY KEY,
+   country_code CHAR(2) NOT NULL,
+   created_at DATETIMEOFFSET DEFAULT SYSDATETIMEOFFSET()
+  );
+ END`
+
+	_, err := db.Exec(createTable)
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+}
+
+func createSessionsTableMSSQL(db *sql.DB) {
+	createTable := `
+ IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='sessions' AND xtype='U')
+ BEGIN
+  CREATE TABLE sessions (
+   id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+   user_id BIGINT NOT NULL,
+   device_type SMALLINT,
+   user_agent_hash BIGINT,
+   created_at DATETIMEOFFSET DEFAULT SYSDATETIMEOFFSET(),
+   CONSTRAINT FK_sessions_user FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+ END`
+
+	_, err := db.Exec(createTable)
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+}
+
+func createActivityTableMSSQL(db *sql.DB) {
+	createTable := `
+ IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='activity_events' AND xtype='U')
+ BEGIN
+  CREATE TABLE activity_events (
+   id BIGINT IDENTITY(1,1) PRIMARY KEY,
+   user_id BIGINT NOT NULL,
+   session_id UNIQUEIDENTIFIER NOT NULL,
+   event_type SMALLINT NOT NULL,
+   timestamp_utc DATETIMEOFFSET DEFAULT SYSDATETIMEOFFSET(),
+   ip_address VARCHAR(45),
+   page_url_hash BIGINT,
+   referrer_hash BIGINT,
+   response_time_ms INT,
+   status_code INT,
+   bytes_transferred BIGINT,
+   CONSTRAINT FK_activity_user FOREIGN KEY (user_id) REFERENCES users(id),
+   CONSTRAINT FK_activity_session FOREIGN KEY (session_id) REFERENCES sessions(id)
+  );
+ END`
+
+	_, err := db.Exec(createTable)
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+}
+
+func insertRelationalDataMSSQL(db *sql.DB) {
+	totalRecords := 1000000
+
+	userStmt, err := db.Prepare("IF NOT EXISTS (SELECT 1 FROM users WHERE id = @p1) INSERT INTO users (id, country_code) VALUES (@p1, @p2)")
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+	defer userStmt.Close()
+
+	sessionStmt, err := db.Prepare("INSERT INTO sessions (user_id, device_type, user_agent_hash) VALUES (@p1, @p2, @p3)")
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+	defer sessionStmt.Close()
+
+	activityStmt, err := db.Prepare(`
+  INSERT INTO activity_events 
+  (user_id, session_id, event_type, timestamp_utc, ip_address, page_url_hash, response_time_ms, status_code, bytes_transferred) 
+  VALUES (@p1, (SELECT TOP 1 id FROM sessions WHERE user_id = @p2 ORDER BY NEWID()), @p3, @p4, @p5, @p6, @p7, @p8, @p9)`)
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+	defer activityStmt.Close()
+
+	for i := 0; i < totalRecords; i++ {
+		userID := rand.Int63n(100000) + 1
+		deviceType := rand.Intn(3) + 1
+		userAgentHash := rand.Int63()
+		timestamp := time.Now().Add(-time.Duration(rand.Intn(86400)) * time.Second)
+		eventType := rand.Intn(5) + 1
+		pageURLHash := rand.Int63()
+		responseTime := rand.Intn(5000)
+		statusCode := 200
+		bytesTransferred := rand.Int63n(10000)
+		ipAddress := fmt.Sprintf("192.168.%d.%d", rand.Intn(255), rand.Intn(255))
+		countryCode := "US"
+
+		userStmt.Exec(sql.Named("p1", userID), sql.Named("p2", countryCode))
+		sessionStmt.Exec(sql.Named("p1", userID), sql.Named("p2", deviceType), sql.Named("p3", userAgentHash))
+		activityStmt.Exec(
+			sql.Named("p1", userID),
+			sql.Named("p2", userID),
+			sql.Named("p3", eventType),
+			sql.Named("p4", timestamp),
+			sql.Named("p5", ipAddress),
+			sql.Named("p6", pageURLHash),
+			sql.Named("p7", responseTime),
+			sql.Named("p8", statusCode),
+			sql.Named("p9", bytesTransferred),
+		)
+
+		if i%50000 == 0 {
+			fmt.Printf("Inserted %d relational records\n", i)
+		}
+	}
+	fmt.Println("Completed: 1 million records inserted into relational tables")
+}

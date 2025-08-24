@@ -217,3 +217,163 @@ func insertOracle(db *sql.DB) {
 	}
 	fmt.Println("Completed: 1 million records inserted into billion-capable table")
 }
+func OracleRelational() {
+	username := "pdbadmin"
+	password := "oracledb"
+	host := "localhost"
+	port := 1521
+	database := "source_data_db"
+
+	dsn := fmt.Sprintf("%s/%s@%s:%d/%s", username, password, host, port, database)
+	db, err := sql.Open("godror", dsn)
+	if err != nil {
+		log.Fatalf("Error connecting to database: %v\n", err)
+	}
+	defer db.Close()
+
+	createUsersTableOracle(db)
+	createSessionsTableOracle(db)
+	createActivityTableOracle(db)
+	insertRelationalDataOracle(db)
+}
+
+func createUsersTableOracle(db *sql.DB) {
+	if !tableExists(db, "USERS") {
+		createTable := `
+  CREATE TABLE users (
+   id NUMBER(19) NOT NULL,
+   country_code CHAR(2) NOT NULL,
+   created_at TIMESTAMP(3) DEFAULT SYSTIMESTAMP,
+   CONSTRAINT pk_users PRIMARY KEY (id)
+  )`
+
+		_, err := db.Exec(createTable)
+		if err != nil {
+			log.Fatalf("err: %s\n", err.Error())
+		}
+
+		if !sequenceExists(db, "USERS_SEQ") {
+			_, err = db.Exec("CREATE SEQUENCE users_seq START WITH 1 INCREMENT BY 1 CACHE 1000")
+			if err != nil {
+				log.Fatalf("err: %s\n", err.Error())
+			}
+		}
+	}
+}
+
+func createSessionsTableOracle(db *sql.DB) {
+	if !tableExists(db, "SESSIONS") {
+		createTable := `
+  CREATE TABLE sessions (
+   id RAW(16) DEFAULT SYS_GUID() NOT NULL,
+   user_id NUMBER(19) NOT NULL,
+   device_type NUMBER(3),
+   user_agent_hash NUMBER(19),
+   created_at TIMESTAMP(3) DEFAULT SYSTIMESTAMP,
+   CONSTRAINT pk_sessions PRIMARY KEY (id),
+   CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id)
+  )`
+
+		_, err := db.Exec(createTable)
+		if err != nil {
+			log.Fatalf("err: %s\n", err.Error())
+		}
+	}
+}
+
+func createActivityTableOracle(db *sql.DB) {
+	if !tableExists(db, "ACTIVITY_EVENTS") {
+		createTable := `
+  CREATE TABLE activity_events (
+   id NUMBER(19) NOT NULL,
+   user_id NUMBER(19) NOT NULL,
+   session_id RAW(16) NOT NULL,
+   event_type NUMBER(3) NOT NULL,
+   timestamp_utc TIMESTAMP(3) DEFAULT SYSTIMESTAMP,
+   ip_address RAW(16),
+   page_url_hash NUMBER(19),
+   referrer_hash NUMBER(19),
+   response_time_ms NUMBER(5),
+   status_code NUMBER(5),
+   bytes_transferred NUMBER(10),
+   CONSTRAINT pk_activity_events PRIMARY KEY (id),
+   CONSTRAINT fk_activity_user FOREIGN KEY (user_id) REFERENCES users(id),
+   CONSTRAINT fk_activity_session FOREIGN KEY (session_id) REFERENCES sessions(id)
+  )`
+
+		_, err := db.Exec(createTable)
+		if err != nil {
+			log.Fatalf("err: %s\n", err.Error())
+		}
+
+		if !sequenceExists(db, "ACTIVITY_EVENTS_SEQ") {
+			_, err = db.Exec("CREATE SEQUENCE activity_events_seq START WITH 1 INCREMENT BY 1 CACHE 1000")
+			if err != nil {
+				log.Fatalf("err: %s\n", err.Error())
+			}
+		}
+
+		if !triggerExists(db, "TRG_ACTIVITY_EVENTS_ID") {
+			triggerSQL := `
+   CREATE OR REPLACE TRIGGER trg_activity_events_id
+   BEFORE INSERT ON activity_events
+   FOR EACH ROW
+   WHEN (NEW.id IS NULL)
+   BEGIN
+    :NEW.id := activity_events_seq.NEXTVAL;
+   END;`
+			_, err = db.Exec(triggerSQL)
+			if err != nil {
+				log.Fatalf("err: %s\n", err.Error())
+			}
+		}
+	}
+}
+
+func insertRelationalDataOracle(db *sql.DB) {
+	totalRecords := 1000000
+
+	userStmt, err := db.Prepare("MERGE INTO users USING DUAL ON (id = :1) WHEN NOT MATCHED THEN INSERT (id, country_code) VALUES (users_seq.NEXTVAL, :2)")
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+	defer userStmt.Close()
+
+	sessionStmt, err := db.Prepare("INSERT INTO sessions (user_id, device_type, user_agent_hash) VALUES (:1, :2, :3)")
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+	defer sessionStmt.Close()
+
+	activityStmt, err := db.Prepare(`
+  INSERT INTO activity_events 
+  (user_id, session_id, event_type, timestamp_utc, ip_address, page_url_hash, response_time_ms, status_code, bytes_transferred) 
+  VALUES (:1, (SELECT id FROM sessions WHERE user_id = :2 AND ROWNUM = 1), :3, :4, HEXTORAW(:5), :6, :7, :8, :9)`)
+	if err != nil {
+		log.Fatalf("err: %s\n", err.Error())
+	}
+	defer activityStmt.Close()
+
+	for i := 0; i < totalRecords; i++ {
+		userID := rand.Int63n(100000) + 1
+		deviceType := rand.Intn(3) + 1
+		userAgentHash := rand.Int63()
+		timestamp := time.Now().Add(-time.Duration(rand.Intn(86400)) * time.Second)
+		eventType := rand.Intn(5) + 1
+		pageURLHash := rand.Int63()
+		responseTime := rand.Intn(5000)
+		statusCode := 200
+		bytesTransferred := rand.Intn(10000)
+		ipHex := fmt.Sprintf("%02X%02X%02X%02X", 192, 168, rand.Intn(255), rand.Intn(255))
+		countryCode := "US"
+
+		userStmt.Exec(userID, countryCode)
+		sessionStmt.Exec(userID, deviceType, userAgentHash)
+		activityStmt.Exec(userID, userID, eventType, timestamp, ipHex, pageURLHash, responseTime, statusCode, bytesTransferred)
+
+		if i%50000 == 0 {
+			fmt.Printf("Inserted %d relational records\n", i)
+		}
+	}
+	fmt.Println("Completed: 1 million records inserted into relational tables")
+}
