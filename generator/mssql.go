@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -474,163 +475,6 @@ type QueueConversation struct {
 	MessageType string
 }
 
-func sendBulkOrderMessages(db *sql.DB, totalOrders int) error {
-	rand.Seed(time.Now().UnixNano())
-
-	// Start dialogs for each queue type
-	conversations := make([]QueueConversation, 0, len(queueTypes))
-
-	// Map message types to queue types more intelligently
-	messageTypeMapping := map[string]string{
-		"new_orders":             "//ECommerce/OrderMessage",
-		"payment_processing":     "//ECommerce/PaymentMessage",
-		"inventory_updates":      "//ECommerce/InventoryMessage",
-		"shipping_notifications": "//ECommerce/ShippingMessage",
-		"customer_service":       "//ECommerce/CustomerServiceMessage",
-		"order_validation":       "//ECommerce/OrderMessage",
-		"fraud_detection":        "//ECommerce/PaymentMessage",
-		"tax_calculation":        "//ECommerce/PaymentMessage",
-		"digital_delivery":       "//ECommerce/ShippingMessage",
-		"express_delivery":       "//ECommerce/ShippingMessage",
-		"international_shipping": "//ECommerce/ShippingMessage",
-		"analytics_processing":   "//ECommerce/OrderMessage",
-		"refund_processing":      "//ECommerce/PaymentMessage",
-		"audit_logs":             "//ECommerce/OrderMessage",
-		"warehouse_fulfillment":  "//ECommerce/InventoryMessage",
-		"priority_processing":    "//ECommerce/OrderMessage",
-		"pickup_orders":          "//ECommerce/ShippingMessage",
-		"discount_processing":    "//ECommerce/PaymentMessage",
-		"loyalty_points":         "//ECommerce/CustomerServiceMessage",
-		"marketing_campaigns":    "//ECommerce/CustomerServiceMessage",
-		"bulk_orders":            "//ECommerce/OrderMessage",
-		"vendor_notifications":   "//ECommerce/InventoryMessage",
-		"supplier_updates":       "//ECommerce/InventoryMessage",
-		"stock_alerts":           "//ECommerce/InventoryMessage",
-		"price_monitoring":       "//ECommerce/InventoryMessage",
-		"returns_management":     "//ECommerce/CustomerServiceMessage",
-		"subscription_billing":   "//ECommerce/PaymentMessage",
-		"gift_cards":             "//ECommerce/PaymentMessage",
-		"third_party_logistics":  "//ECommerce/ShippingMessage",
-		"backorder_processing":   "//ECommerce/InventoryMessage",
-	}
-
-	// Verify we have the correct number of mappings
-	expectedCount := len(queueTypes)
-	if len(messageTypeMapping) != expectedCount {
-		return fmt.Errorf("message type mapping must have exactly %d entries, got %d", expectedCount, len(messageTypeMapping))
-	}
-
-	for _, queueType := range queueTypes {
-		messageType, exists := messageTypeMapping[queueType]
-		if !exists {
-			return fmt.Errorf("no message type mapping found for queue type: %s", queueType)
-		}
-
-		startDialog := fmt.Sprintf(`
-            DECLARE @ch UNIQUEIDENTIFIER;
-            BEGIN DIALOG CONVERSATION @ch
-                FROM SERVICE [%s_initiator_service]
-                TO SERVICE '%s_target_service'
-                ON CONTRACT [//ECommerce/OrderContract]
-                WITH ENCRYPTION = OFF;
-            SELECT CONVERT(VARCHAR(36), @ch);
-        `, queueType, queueType)
-
-		var conversationHandle string
-		err := db.QueryRow(startDialog).Scan(&conversationHandle)
-		if err != nil {
-			return fmt.Errorf("failed to start dialog for %s queue: %w", queueType, err)
-		}
-
-		// Clean the conversation handle (remove any whitespace)
-		conversationHandle = strings.TrimSpace(conversationHandle)
-
-		// Validate the conversation handle format (should be a valid GUID)
-		if len(conversationHandle) != 36 {
-			return fmt.Errorf("invalid conversation handle format for %s: '%s' (length: %d)", queueType, conversationHandle, len(conversationHandle))
-		}
-
-		conversations = append(conversations, QueueConversation{
-			Handle:      conversationHandle,
-			QueueType:   queueType,
-			MessageType: messageType,
-		})
-	}
-
-	fmt.Printf("✅ Started %d conversations for order processing\n", len(conversations))
-
-	// Track orders per queue for reporting
-	ordersPerQueue := make(map[string]int)
-
-	// Initialize all queue counters to 0
-	for _, queueType := range queueTypes {
-		ordersPerQueue[queueType] = 0
-	}
-
-	// Send orders in batches
-	batchSize := 1000
-	for i := 1; i <= totalOrders; i++ {
-		// Generate realistic order data
-		order := generateRandomOrder(i)
-
-		// Select appropriate queue based on order characteristics
-		selectedConv := selectQueueForOrder(conversations, order)
-
-		// Convert order to JSON and escape single quotes for SQL
-		orderJSON, err := json.Marshal(order)
-		if err != nil {
-			return fmt.Errorf("failed to marshal order %d: %w", i, err)
-		}
-
-		// Escape single quotes in JSON for SQL and wrap in N'' for Unicode
-		escapedJSON := strings.ReplaceAll(string(orderJSON), "'", "''")
-
-		// Send order message using proper GUID format
-		sendMessage := fmt.Sprintf(`
-            SEND ON CONVERSATION '%s'
-            MESSAGE TYPE [%s]
-            (N'%s');
-        `, selectedConv.Handle, selectedConv.MessageType, escapedJSON)
-
-		_, err = db.Exec(sendMessage)
-		if err != nil {
-			return fmt.Errorf("failed to send order %d to %s queue (handle: %s): %w",
-				i, selectedConv.QueueType, selectedConv.Handle, err)
-		}
-
-		// Track order count per queue
-		ordersPerQueue[selectedConv.QueueType]++
-
-		// Progress reporting
-		if i%batchSize == 0 {
-			fmt.Printf("📦 Processed %d/%d orders...\n", i, totalOrders)
-		}
-	}
-
-	// Report distribution
-	fmt.Printf("\n✅ Successfully sent %d e-commerce orders\n", totalOrders)
-	fmt.Println("\n📊 Order Distribution by Queue Type:")
-	fmt.Println("Queue Type\t\t\tOrders\t\tPercentage")
-	fmt.Println("----------\t\t\t------\t\t----------")
-
-	totalDistributed := 0
-	queuesUsed := 0
-	for _, queueType := range queueTypes {
-		count := ordersPerQueue[queueType]
-		percentage := float64(count) / float64(totalOrders) * 100
-		fmt.Printf("%-25s\t%d\t\t%.1f%%\n", queueType, count, percentage)
-		totalDistributed += count
-		if count > 0 {
-			queuesUsed++
-		}
-	}
-
-	fmt.Printf("\nSummary: %d queues used out of %d total queues\n", queuesUsed, len(queueTypes))
-	fmt.Printf("Total orders distributed: %d\n", totalDistributed)
-
-	return nil
-}
-
 func generateRandomOrder(orderNum int) Order {
 	rand.Seed(time.Now().UnixNano() + int64(orderNum))
 
@@ -719,76 +563,123 @@ func generateRandomOrder(orderNum int) Order {
 		DiscountAmount:  discountAmount,
 	}
 }
-
 func selectQueueForOrder(conversations []QueueConversation, order Order) QueueConversation {
-	// Enhanced intelligent queue selection based on order characteristics
-	var preferredQueues []string
-
-	switch {
-	case order.Status == "pending":
-		preferredQueues = []string{"new_orders", "order_validation", "fraud_detection"}
-	case order.PaymentMethod == "credit_card" || order.PaymentMethod == "debit_card":
-		preferredQueues = []string{"payment_processing", "fraud_detection", "tax_calculation"}
-	case order.PaymentMethod == "paypal" || order.PaymentMethod == "apple_pay":
-		preferredQueues = []string{"payment_processing", "digital_delivery", "subscription_billing"}
-	case order.PaymentMethod == "cash_on_delivery":
-		preferredQueues = []string{"payment_processing", "pickup_orders", "warehouse_fulfillment"}
-	case order.Status == "shipped":
-		preferredQueues = []string{"shipping_notifications", "express_delivery", "international_shipping", "third_party_logistics"}
-	case order.Status == "delivered":
-		preferredQueues = []string{"shipping_notifications", "customer_service", "analytics_processing"}
-	case order.Status == "cancelled":
-		preferredQueues = []string{"customer_service", "refund_processing", "analytics_processing", "returns_management"}
-	case order.Status == "refunded":
-		preferredQueues = []string{"refund_processing", "customer_service", "audit_logs", "returns_management"}
-	case order.ShippingMethod == "express" || order.ShippingMethod == "overnight":
-		preferredQueues = []string{"express_delivery", "warehouse_fulfillment", "priority_processing"}
-	case order.ShippingMethod == "standard" || order.ShippingMethod == "ground":
-		preferredQueues = []string{"warehouse_fulfillment", "third_party_logistics", "shipping_notifications"}
-	case strings.Contains(order.ShippingAddress.Country, "USA") == false:
-		preferredQueues = []string{"international_shipping", "third_party_logistics", "tax_calculation"}
-	case order.DiscountCode != "":
-		preferredQueues = []string{"discount_processing", "loyalty_points", "marketing_campaigns"}
-	case order.TotalAmount > 1000:
-		preferredQueues = []string{"bulk_orders", "fraud_detection", "audit_logs", "priority_processing"}
-	case order.TotalAmount < 50:
-		preferredQueues = []string{"new_orders", "digital_delivery", "analytics_processing"}
-	case len(order.Items) > 3:
-		preferredQueues = []string{"bulk_orders", "warehouse_fulfillment", "inventory_updates", "vendor_notifications"}
-	case order.OrderSource == "mobile_app":
-		preferredQueues = []string{"new_orders", "analytics_processing", "loyalty_points", "digital_delivery"}
-	case order.OrderSource == "marketplace":
-		preferredQueues = []string{"vendor_notifications", "supplier_updates", "analytics_processing", "third_party_logistics"}
-	case order.OrderSource == "in_store":
-		preferredQueues = []string{"pickup_orders", "warehouse_fulfillment", "loyalty_points"}
-	case containsCategory(order.Items, "Electronics"):
-		preferredQueues = []string{"inventory_updates", "vendor_notifications", "stock_alerts", "price_monitoring"}
-	case containsCategory(order.Items, "Clothing"):
-		preferredQueues = []string{"inventory_updates", "returns_management", "supplier_updates"}
-	case hasGiftCard(order):
-		preferredQueues = []string{"gift_cards", "digital_delivery", "customer_service"}
-	case isSubscriptionOrder(order):
-		preferredQueues = []string{"subscription_billing", "customer_service", "loyalty_points"}
-	default:
-		// Ensure all remaining queues get some traffic
-		allQueues := make([]string, len(queueTypes))
-		copy(allQueues, queueTypes)
-		preferredQueues = allQueues
+	weights := make(map[string]int)
+	// Initialize all queues with base weight
+	for _, conv := range conversations {
+		weights[conv.QueueType] = 1
 	}
-
-	return selectFromQueues(conversations, preferredQueues)
-}
-
-// Helper functions
-func containsCategory(items []OrderItem, category string) bool {
-	for _, item := range items {
-		if item.Category == category {
-			return true
+	// Add bonus weights based on order characteristics
+	switch order.Status {
+	case "pending":
+		weights["new_orders"] += 3
+		weights["order_validation"] += 2
+		weights["fraud_detection"] += 1
+	case "processing":
+		weights["payment_processing"] += 2
+		weights["inventory_updates"] += 2
+		weights["warehouse_fulfillment"] += 1
+	case "shipped":
+		weights["shipping_notifications"] += 3
+		weights["analytics_processing"] += 1
+	case "delivered":
+		weights["analytics_processing"] += 2
+		weights["customer_service"] += 1
+	case "cancelled":
+		weights["refund_processing"] += 2
+		weights["customer_service"] += 1
+		weights["analytics_processing"] += 1
+	case "refunded":
+		weights["refund_processing"] += 3
+		weights["audit_logs"] += 1
+	}
+	// Payment method weights
+	if order.PaymentMethod == "credit_card" || order.PaymentMethod == "debit_card" {
+		weights["payment_processing"] += 1
+		weights["fraud_detection"] += 1
+	}
+	// Shipping method weights
+	if order.ShippingMethod == "express" || order.ShippingMethod == "overnight" {
+		weights["express_delivery"] += 2
+		weights["priority_processing"] += 1
+	}
+	// International orders
+	if order.ShippingAddress.Country != "USA" {
+		weights["international_shipping"] += 2
+		weights["tax_calculation"] += 1
+	}
+	// High value orders
+	if order.TotalAmount > 500 {
+		weights["bulk_orders"] += 1
+		weights["fraud_detection"] += 1
+		weights["audit_logs"] += 1
+	}
+	// Discount orders
+	if order.DiscountCode != "" {
+		weights["discount_processing"] += 2
+		weights["marketing_campaigns"] += 1
+	}
+	// Multiple items
+	if len(order.Items) > 2 {
+		weights["inventory_updates"] += 1
+		weights["warehouse_fulfillment"] += 1
+	}
+	// Category-based routing
+	for _, item := range order.Items {
+		switch item.Category {
+		case "Electronics":
+			weights["vendor_notifications"] += 1
+			weights["stock_alerts"] += 1
+		case "Clothing":
+			weights["returns_management"] += 1
+			weights["supplier_updates"] += 1
 		}
 	}
-	return false
+	// Order source weights
+	switch order.OrderSource {
+	case "mobile_app":
+		weights["loyalty_points"] += 1
+		weights["digital_delivery"] += 1
+	case "marketplace":
+		weights["third_party_logistics"] += 1
+		weights["vendor_notifications"] += 1
+	case "in_store":
+		weights["pickup_orders"] += 2
+	}
+	// Special product handling
+	if hasGiftCard(order) {
+		weights["gift_cards"] += 3
+	}
+	if isSubscriptionOrder(order) {
+		weights["subscription_billing"] += 3
+	}
+	// Add randomness to ensure distribution across unused queues
+	unusedQueues := []string{
+		"price_monitoring", "backorder_processing", "tax_calculation",
+		"digital_delivery", "priority_processing", "analytics_processing",
+	}
+	// Randomly boost unused queues
+	if rand.Float32() < 0.1 { // 10% chance
+		randomQueue := unusedQueues[rand.Intn(len(unusedQueues))]
+		weights[randomQueue] += 5
+	}
+	// Calculate total weight
+	totalWeight := 0
+	for _, weight := range weights {
+		totalWeight += weight
+	}
+	// Select weighted random queue
+	randomValue := rand.Intn(totalWeight)
+	currentSum := 0
+	for _, conv := range conversations {
+		currentSum += weights[conv.QueueType]
+		if currentSum > randomValue {
+			return conv
+		}
+	}
+	// Fallback to random
+	return conversations[rand.Intn(len(conversations))]
 }
-
 func hasGiftCard(order Order) bool {
 	for _, item := range order.Items {
 		if strings.Contains(strings.ToLower(item.ProductName), "gift") {
@@ -803,15 +694,231 @@ func isSubscriptionOrder(order Order) bool {
 		order.PaymentMethod == "bank_transfer"
 }
 
-func selectFromQueues(conversations []QueueConversation, preferredQueues []string) QueueConversation {
-	// Try to find one of the preferred queues
-	for _, preferred := range preferredQueues {
-		for _, conv := range conversations {
-			if conv.QueueType == preferred {
-				return conv
-			}
+func sendBulkOrderMessages(db *sql.DB, totalOrders int) error {
+	rand.Seed(time.Now().UnixNano())
+
+	// Start dialogs for each queue type
+	conversations := make([]QueueConversation, 0, len(queueTypes))
+
+	// Message type mapping (existing code)
+	messageTypeMapping := map[string]string{
+		"new_orders":             "//ECommerce/OrderMessage",
+		"payment_processing":     "//ECommerce/PaymentMessage",
+		"inventory_updates":      "//ECommerce/InventoryMessage",
+		"shipping_notifications": "//ECommerce/ShippingMessage",
+		"customer_service":       "//ECommerce/CustomerServiceMessage",
+		"order_validation":       "//ECommerce/OrderMessage",
+		"fraud_detection":        "//ECommerce/PaymentMessage",
+		"tax_calculation":        "//ECommerce/PaymentMessage",
+		"digital_delivery":       "//ECommerce/ShippingMessage",
+		"express_delivery":       "//ECommerce/ShippingMessage",
+		"international_shipping": "//ECommerce/ShippingMessage",
+		"analytics_processing":   "//ECommerce/OrderMessage",
+		"refund_processing":      "//ECommerce/PaymentMessage",
+		"audit_logs":             "//ECommerce/OrderMessage",
+		"warehouse_fulfillment":  "//ECommerce/InventoryMessage",
+		"priority_processing":    "//ECommerce/OrderMessage",
+		"pickup_orders":          "//ECommerce/ShippingMessage",
+		"discount_processing":    "//ECommerce/PaymentMessage",
+		"loyalty_points":         "//ECommerce/CustomerServiceMessage",
+		"marketing_campaigns":    "//ECommerce/CustomerServiceMessage",
+		"bulk_orders":            "//ECommerce/OrderMessage",
+		"vendor_notifications":   "//ECommerce/InventoryMessage",
+		"supplier_updates":       "//ECommerce/InventoryMessage",
+		"stock_alerts":           "//ECommerce/InventoryMessage",
+		"price_monitoring":       "//ECommerce/InventoryMessage",
+		"returns_management":     "//ECommerce/CustomerServiceMessage",
+		"subscription_billing":   "//ECommerce/PaymentMessage",
+		"gift_cards":             "//ECommerce/PaymentMessage",
+		"third_party_logistics":  "//ECommerce/ShippingMessage",
+		"backorder_processing":   "//ECommerce/InventoryMessage",
+	}
+
+	for _, queueType := range queueTypes {
+		messageType, exists := messageTypeMapping[queueType]
+		if !exists {
+			return fmt.Errorf("no message type mapping found for queue type: %s", queueType)
+		}
+
+		startDialog := fmt.Sprintf(`
+            DECLARE @ch UNIQUEIDENTIFIER;
+            BEGIN DIALOG CONVERSATION @ch
+                FROM SERVICE [%s_initiator_service]
+                TO SERVICE '%s_target_service'
+                ON CONTRACT [//ECommerce/OrderContract]
+                WITH ENCRYPTION = OFF;
+            SELECT CONVERT(VARCHAR(36), @ch);
+        `, queueType, queueType)
+
+		var conversationHandle string
+		err := db.QueryRow(startDialog).Scan(&conversationHandle)
+		if err != nil {
+			return fmt.Errorf("failed to start dialog for %s queue: %w", queueType, err)
+		}
+
+		conversationHandle = strings.TrimSpace(conversationHandle)
+
+		if len(conversationHandle) != 36 {
+			return fmt.Errorf("invalid conversation handle format for %s: '%s'", queueType, conversationHandle)
+		}
+
+		conversations = append(conversations, QueueConversation{
+			Handle:      conversationHandle,
+			QueueType:   queueType,
+			MessageType: messageType,
+		})
+	}
+
+	fmt.Printf("✅ Started %d conversations for order processing\n", len(conversations))
+
+	// Track orders per queue for reporting
+	ordersPerQueue := make(map[string]int)
+	for _, queueType := range queueTypes {
+		ordersPerQueue[queueType] = 0
+	}
+
+	// Send orders in batches
+	batchSize := 1000
+	for i := 1; i <= totalOrders; i++ {
+		// Generate realistic order data
+		order := generateRandomOrder(i)
+
+		// Select appropriate queue based on order characteristics
+		selectedConv := selectQueueForOrder(conversations, order)
+
+		// Convert order to JSON
+		orderJSON, err := json.Marshal(order)
+		if err != nil {
+			return fmt.Errorf("failed to marshal order %d: %w", i, err)
+		}
+
+		// THE FIX: Use parameterized query with proper binary handling
+		err = sendOrderMessage(db, selectedConv.Handle, selectedConv.MessageType, orderJSON)
+		if err != nil {
+			return fmt.Errorf("failed to send order %d to %s queue: %w",
+				i, selectedConv.QueueType, err)
+		}
+
+		// Track order count per queue
+		ordersPerQueue[selectedConv.QueueType]++
+
+		// Progress reporting
+		if i%batchSize == 0 {
+			fmt.Printf("📦 Processed %d/%d orders...\n", i, totalOrders)
 		}
 	}
-	// Fallback to random selection if preferred queues not found
-	return conversations[rand.Intn(len(conversations))]
+
+	// Report distribution (existing code)
+	fmt.Printf("\n✅ Successfully sent %d e-commerce orders\n", totalOrders)
+	fmt.Println("\n📊 Order Distribution by Queue Type:")
+	fmt.Println("Queue Type\t\t\tOrders\t\tPercentage")
+	fmt.Println("----------\t\t\t------\t\t----------")
+
+	totalDistributed := 0
+	queuesUsed := 0
+	for _, queueType := range queueTypes {
+		count := ordersPerQueue[queueType]
+		percentage := float64(count) / float64(totalOrders) * 100
+		fmt.Printf("%-25s\t%d\t\t%.1f%%\n", queueType, count, percentage)
+		totalDistributed += count
+		if count > 0 {
+			queuesUsed++
+		}
+	}
+
+	fmt.Printf("\nSummary: %d queues used out of %d total queues\n", queuesUsed, len(queueTypes))
+	fmt.Printf("Total orders distributed: %d\n", totalDistributed)
+	for _, handle := range conversations {
+		_, err := db.ExecContext(context.Background(), `
+			END CONVERSATION @handle
+		`,
+			sql.Named("handle", handle.Handle),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// THE BEST FIX: Dedicated function for sending messages safely
+func sendOrderMessage(db *sql.DB, conversationHandle, messageType string, jsonData []byte) error {
+	// Method 1: Try with binary parameter (most reliable)
+	sendSQL := `
+		SEND ON CONVERSATION @handle
+		MESSAGE TYPE @msgtype
+		(@jsondata);
+	`
+
+	// Prepare statement with parameters
+	stmt, err := db.Prepare(sendSQL)
+	if err != nil {
+		// Fallback method if parameterized queries aren't supported
+		return sendOrderMessageFallback(db, conversationHandle, messageType, jsonData)
+	}
+	defer stmt.Close()
+
+	// Execute with parameters - this prevents all encoding issues
+	_, err = stmt.Exec(
+		sql.Named("handle", conversationHandle),
+		sql.Named("msgtype", messageType),
+		sql.Named("jsondata", jsonData), // Pass as []byte directly
+	)
+
+	if err != nil {
+		// If parameterized method fails, try fallback
+		return sendOrderMessageFallback(db, conversationHandle, messageType, jsonData)
+	}
+
+	return nil
+}
+
+// Fallback method using string manipulation
+func sendOrderMessageFallback(db *sql.DB, conversationHandle, messageType string, jsonData []byte) error {
+	// Clean the JSON data
+	cleanJSON := cleanJSONForSQL(string(jsonData))
+
+	// Validate the cleaned JSON
+	var testObj interface{}
+	if err := json.Unmarshal([]byte(cleanJSON), &testObj); err != nil {
+		return fmt.Errorf("JSON became invalid after cleaning: %w", err)
+	}
+
+	// Use VARBINARY to avoid string encoding issues
+	sendMessage := fmt.Sprintf(`
+		DECLARE @conversation_handle UNIQUEIDENTIFIER = '%s';
+		DECLARE @message_type SYSNAME = N'%s';
+		DECLARE @json_data NVARCHAR(MAX) = N'%s';
+		DECLARE @binary_data VARBINARY(MAX) = CAST(@json_data AS VARBINARY(MAX));
+		
+		SEND ON CONVERSATION @conversation_handle
+		MESSAGE TYPE @message_type
+		(@binary_data);
+	`, conversationHandle, messageType, cleanJSON)
+
+	_, err := db.Exec(sendMessage)
+	return err
+}
+
+// Enhanced JSON cleaning function
+func cleanJSONForSQL(jsonStr string) string {
+	// Step 1: Remove null bytes
+	cleaned := strings.ReplaceAll(jsonStr, "\x00", "")
+
+	// Step 2: Escape single quotes for SQL
+	cleaned = strings.ReplaceAll(cleaned, "'", "''")
+
+	// Step 3: Remove other problematic control characters
+	var result strings.Builder
+	result.Grow(len(cleaned)) // Pre-allocate for efficiency
+
+	for _, r := range cleaned {
+		// Keep printable characters and essential whitespace
+		if r >= 32 || r == '\t' || r == '\n' || r == '\r' {
+			result.WriteRune(r)
+		}
+		// Skip other control characters
+	}
+
+	return result.String()
 }
