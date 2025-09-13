@@ -9,5 +9,11 @@ func main() {
 	// generator.MSSQL()
 	// generator.Oracle()
 	// generator.Redis()
-	generator.MongoDB()
+	// generator.MongoDB()
+	// generator.MySQLRelational()
+	// generator.PostgresRelational()
+	// generator.OracleRelational()
+	// generator.MSQLRelational()
+	// generator.MSSQLECommerceOrderBroker()
+	generator.Elasticsearch()
 }
