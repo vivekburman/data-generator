@@ -1,6 +1,8 @@
 package main
 
-import "datagenerator/generator"
+import (
+	generator "datagenerator/generator/elastic"
+)
 
 func main() {
 	// generator.MariaDB()
@@ -15,5 +17,9 @@ func main() {
 	// generator.OracleRelational()
 	// generator.MSQLRelational()
 	// generator.MSSQLECommerceOrderBroker()
-	generator.Elasticsearch()
+	// generator.Elasticsearch()
+	// for range 10 {
+	// 	generator.PerformSeed()
+	// }
+	generator.CreateElasticsearchSchema()
 }
