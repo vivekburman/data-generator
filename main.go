@@ -1,7 +1,7 @@
 package main
 
 import (
-	generator "datagenerator/generator/elastic"
+	generator "datagenerator/generator/postgres"
 )
 
 func main() {
@@ -21,5 +21,6 @@ func main() {
 	// for range 10 {
 	// 	generator.PerformSeed()
 	// }
-	generator.CreateElasticsearchSchema()
+	// generator.CreateElasticsearchSchema()
+	generator.CreateAirportDemoPostgresSchema()
 }

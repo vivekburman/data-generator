@@ -51,6 +51,10 @@ func CreateAirportDemoPostgresSchema() {
 		log.Fatalf("Failed to create schema: %v", err)
 	}
 
+	if err := createETLMetadataSchemas(ctx, db); err != nil {
+		log.Fatalf("Failed to create schema: %v", err)
+	}
+
 	log.Println("Schema creation completed successfully!")
 }
 func createSchema(ctx context.Context, db *sql.DB) error {
@@ -972,16 +976,15 @@ func seedTransactions(ctx context.Context, db *sql.DB, accounts []AccountInfo, c
 }
 
 // seedSupportingData creates cards, KYC, etc.
-func seedSupportingData(ctx context.Context, db *sql.DB, tenantIDs []int64, customers []CustomerAccount, accounts []AccountInfo) error {
+func seedSupportingData(ctx context.Context, db *sql.DB, _ []int64, _ []CustomerAccount, accounts []AccountInfo) error {
 	log.Println("Seeding supporting data...")
 
 	// Seed some cards (10% of accounts)
-	cardCount := len(accounts) / 10
-	if cardCount > 1000 {
-		cardCount = 1000 // Limit for demo
-	}
+	cardCount := min(len(accounts)/10,
+		// Limit for demo
+		1000)
 
-	for i := 0; i < cardCount; i++ {
+	for range cardCount {
 		account := accounts[rand.Intn(len(accounts))]
 		lastFour := fmt.Sprintf("%04d", rand.Intn(10000))
 		cardTypes := []string{"debit", "credit"}
@@ -1009,32 +1012,123 @@ func seedSupportingData(ctx context.Context, db *sql.DB, tenantIDs []int64, cust
 	return nil
 }
 
-// Add this to check current data counts
-func printDataStats(ctx context.Context, db *sql.DB) error {
-	tables := []string{"tenants", "customers", "accounts", "transactions"}
-
-	fmt.Println("\n=== Current Data Statistics ===")
-	for _, table := range tables {
-		var count int64
-		err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%-15s: %s\n", table, formatNumber(count))
+func createETLMetadataSchemas(ctx context.Context, db *sql.DB) error {
+	schemas := []string{
+		createETLSchemas(),
+		createCheckpointTable(),
+		createBacklogTable(),
+		createMetricsTable(),
 	}
-	fmt.Println("================================\n")
+
+	for _, schema := range schemas {
+		if _, err := db.ExecContext(ctx, schema); err != nil {
+			return fmt.Errorf("error executing ETL metadata schema: %w", err)
+		}
+	}
+
+	log.Println("✓ ETL metadata schemas created successfully")
 	return nil
 }
 
-func formatNumber(n int64) string {
-	str := fmt.Sprintf("%d", n)
-	var result []byte
-	for i, digit := range str {
-		if i > 0 && (len(str)-i)%3 == 0 {
-			result = append(result, ',')
-		}
-		result = append(result, byte(digit))
-	}
-	return string(result)
+func createETLSchemas() string {
+	return `
+CREATE SCHEMA IF NOT EXISTS checkpoint;
+CREATE SCHEMA IF NOT EXISTS backlog;
+CREATE SCHEMA IF NOT EXISTS metrics;
+`
+}
+
+func createCheckpointTable() string {
+	return `
+-- Checkpoint tracking for ETL flows
+CREATE TABLE IF NOT EXISTS checkpoint.flow_tracking (
+    flow_id VARCHAR(100) NOT NULL,
+    partition_key VARCHAR(100) NOT NULL,
+    
+    -- Progress
+    last_processed_id BIGINT DEFAULT 0,
+    records_processed BIGINT DEFAULT 0,
+    
+    -- Status
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed')),
+    
+    -- Timing
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Error handling
+    error_message TEXT,
+    retry_count INT DEFAULT 0,
+    
+    PRIMARY KEY (flow_id, partition_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_status ON checkpoint.flow_tracking(status, flow_id);
+`
+}
+
+func createBacklogTable() string {
+	return `
+-- Failed records queue for retry
+CREATE TABLE IF NOT EXISTS backlog.failed_records (
+    backlog_id BIGSERIAL PRIMARY KEY,
+    
+    -- Flow context
+    flow_id VARCHAR(100) NOT NULL,
+    partition_key VARCHAR(100),
+    
+    -- Record identification
+    record_id BIGINT NOT NULL,
+    
+    -- Error details
+    error_message TEXT,
+    error_type VARCHAR(100),
+    
+    -- Retry management
+    retry_count INT DEFAULT 0,
+    max_retries INT DEFAULT 3,
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'resolved', 'failed')),
+    
+    -- Timing
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_retry_at TIMESTAMP,
+    
+    -- Original data (optional, for debugging)
+    original_payload JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_backlog_status ON backlog.failed_records(status, flow_id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_backlog_flow ON backlog.failed_records(flow_id, created_at);
+`
+}
+
+func createMetricsTable() string {
+	return `
+-- Flow execution metrics
+CREATE TABLE IF NOT EXISTS metrics.flow_runs (
+    run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    flow_id VARCHAR(100) NOT NULL,
+    
+    -- Counts
+    total_records BIGINT,
+    processed_records BIGINT DEFAULT 0,
+    failed_records BIGINT DEFAULT 0,
+    
+    -- Timing
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP,
+    
+    -- Performance
+    throughput DECIMAL(10, 2), -- records/second
+    
+    -- Status
+    status VARCHAR(20) DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+    error_summary TEXT,
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_flow_runs_flow ON metrics.flow_runs(flow_id, start_time DESC);
+`
 }
