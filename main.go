@@ -1,8 +1,6 @@
 package main
 
-import (
-	generator "datagenerator/generator/postgres"
-)
+import "datagenerator/generator"
 
 func main() {
 	// generator.MariaDB()
@@ -22,5 +20,7 @@ func main() {
 	// 	generator.PerformSeed()
 	// }
 	// generator.CreateElasticsearchSchema()
-	generator.CreateAirportDemoPostgresSchema()
+	// generator.CreateAirportDemoPostgresSchema()
+	generator.RabbitMQ()
+	defer generator.CloseRabbitMQ()
 }
